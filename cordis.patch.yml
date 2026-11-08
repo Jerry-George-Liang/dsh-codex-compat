@@ -1,0 +1,6 @@
+- insert:
+    - id: local-codex-compat
+      name: '@local/dsh-codex-compat'
+      config:
+        mode: headers
+        upstreamBaseURL: https://api.tu-zi.com/coding/v1
