@@ -1,7 +1,11 @@
 {
   "name": "@local/dsh-codex-compat",
   "version": "1.1.4",
-  "private": true,
+  "private": false,
+  "author": "Jerry-George-Liang",
+  "homepage": "https://github.com/Jerry-George-Liang/dsh-codex-compat#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/Jerry-George-Liang/dsh-codex-compat.git" },
+  "keywords": ["dsh-plugin", "deepseek-harness", "codex", "openai-responses", "proxy"],
   "type": "module",
   "description": "Switch between scoped Codex headers and a managed loopback proxy with automatic provider routing.",
   "exports": { ".": "./host-1.1.4.js", "./client": "./client.js", "./locale/*.json": "./locale/*.json", "./icon": "./icon.svg" },
