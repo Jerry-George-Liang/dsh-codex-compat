@@ -164,6 +164,9 @@ export function createCompatibilityServer(source, { resolveKey, request = https.
     outgoing.on('close', () => { if (!outgoing.writableFinished) upstream.destroy(); });
     pipeline(incoming, upstream, error => { if (error) upstream.destroy(); });
   }
+  // Mode switches destroy local sockets. Advertise Connection: close so Node
+  // 22/24 clients do not reuse a stale pooled socket after a rapid restart.
+  server.maxRequestsPerSocket = 1;
   server.headersTimeout = 15_000;
   server.requestTimeout = config.idleTimeoutMs;
   server.stop = () => new Promise(resolve => {

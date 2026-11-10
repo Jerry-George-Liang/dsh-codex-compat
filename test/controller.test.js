@@ -328,10 +328,13 @@ test('real proxy listens before routing, stops, and rebinds after a round trip w
       assert.equal((await f.controller.setMode('proxy')).phase, 'ready');
       const health = await fetch(`http://127.0.0.1:${port}/health`);
       assert.equal(health.status, 200);
+      assert.equal(health.headers.get('connection'), 'close');
       assert.equal((await health.json()).mode, 'proxy');
       f.documents[0].value.providers.codex.apiKeyEnv = `ROTATED_REF_${i}`;
       const refused = await fetch(`http://127.0.0.1:${port}/v1/models`, { headers: { Authorization: 'Bearer deliberately-wrong' } });
       assert.equal(refused.status, 401); // Rejected locally, never forwarded upstream.
+      assert.equal(refused.headers.get('connection'), 'close');
+      await refused.arrayBuffer();
       assert.equal(f.events.filter(e => e[0] === 'credential').at(-1)[1], `ROTATED_REF_${i}`);
       assert.equal((await f.controller.setMode('headers')).phase, 'ready');
       assert.equal(f.controller.server, undefined);
