@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { mock } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
@@ -217,24 +217,103 @@ test('replacement waits for old pending work and route restoration before starti
   await replacement.controller.dispose();
 });
 
-test('real occupied port does not redirect provider and bounded credential wait can recover', async () => {
+test('occupied preferred port falls back to an OS-assigned port before routing', async () => {
   const blocker = http.createServer();
   blocker.listen(0, '127.0.0.1');
   await once(blocker, 'listening');
-  const f = fixture({ config: { port: blocker.address().port }, io: { startProxy: undefined } });
+  const preferredPort = blocker.address().port;
+  const f = fixture({ config: { port: preferredPort }, io: { startProxy: undefined } });
   try {
     await f.controller.setMode('headers');
     const state = await f.controller.setMode('proxy');
-    assert.equal(state.mode, 'headers');
-    assert.match(state.message, /端口/);
+    assert.equal(state.mode, 'proxy');
+    assert.equal(state.phase, 'ready');
+    assert.notEqual(f.controller.server.address().port, preferredPort);
+    assert.equal(f.documents[0].value.providers.codex.baseURL, state.proxyBaseURL);
+    const health = await fetch(state.proxyBaseURL.replace('/v1', '/health'));
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).baseURL, state.proxyBaseURL);
+    const saved = f.events.find(e => e[0] === 'state' && e[1].proxyBaseURL === state.proxyBaseURL);
+    assert(f.events.indexOf(saved) < f.events.findIndex(e => e[0] === 'route'));
+    assert.equal((await f.controller.setMode('headers')).phase, 'ready');
     assert.equal(f.documents[0].value.providers.codex.baseURL, upstream);
   } finally {
     await f.controller.dispose();
     await new Promise(resolve => blocker.close(resolve));
   }
+});
+
+test('bounded credential wait reports failure without redirecting providers', async () => {
   const slow = fixture({ config: { idleTimeoutMs: 20 }, io: { resolveKey: () => new Promise(() => {}) } });
   assert.equal((await slow.controller.setMode('proxy')).phase, 'error');
+  assert.equal(slow.documents[0].value.providers.codex.baseURL, upstream);
   await slow.controller.dispose();
+});
+
+test('Windows reserved port EACCES falls back to an OS-assigned listener', async t => {
+  const attempts = [];
+  const listen = http.Server.prototype.listen;
+  const mocked = mock.method(http.Server.prototype, 'listen', function (port, ...args) {
+    attempts.push(port);
+    if (attempts.length === 1) {
+      queueMicrotask(() => this.emit('error', Object.assign(new Error('reserved port'), { code: 'EACCES' })));
+      return this;
+    }
+    return listen.call(this, port, ...args);
+  });
+  t.after(() => mocked.mock.restore());
+  const f = fixture({ io: { startProxy: undefined } });
+  try {
+    const state = await f.controller.setMode('proxy');
+    assert.deepEqual(attempts, [3081, 0]);
+    assert.equal(state.phase, 'ready');
+    assert.equal(state.proxyBaseURL, `http://127.0.0.1:${f.controller.server.address().port}/v1`);
+  } finally { await f.controller.dispose(); }
+});
+
+test('unrecoverable listen error includes its code and keeps direct routes', async t => {
+  const mocked = mock.method(http.Server.prototype, 'listen', function () {
+    queueMicrotask(() => this.emit('error', Object.assign(new Error('reserved port'), { code: 'EACCES' })));
+    return this;
+  });
+  t.after(() => mocked.mock.restore());
+  const f = fixture({ io: { startProxy: undefined } });
+  try {
+    await f.controller.setMode('headers');
+    const state = await f.controller.setMode('proxy');
+    assert.equal(state.phase, 'error');
+    assert.equal(state.mode, 'headers');
+    assert.match(state.message, /EACCES/);
+    assert.equal(f.documents[0].value.providers.codex.baseURL, upstream);
+  } finally { await f.controller.dispose(); }
+});
+
+test('OS-assigned ports and saved proxy addresses recover across restart without touching other URLs', async () => {
+  const oldURL = 'http://127.0.0.1:12345/v1';
+  const otherURL = 'http://127.0.0.1:12346/v1';
+  for (const mode of ['headers', 'off', 'proxy']) {
+    const f = fixture({ config: { port: 0 }, io: { startProxy: undefined, previousProxyURL: oldURL } });
+    f.documents[0].value.providers.codex.baseURL = oldURL;
+    f.documents[0].value.providers.unrelated.baseURL = otherURL;
+    try {
+      const state = await f.controller.setMode(mode);
+      assert.equal(state.phase, 'ready');
+      assert.equal(f.documents[0].value.providers.codex.baseURL, mode === 'proxy' ? state.proxyBaseURL : upstream);
+      assert.equal(f.documents[0].value.providers.unrelated.baseURL, otherURL);
+      if (mode === 'proxy') assert(f.controller.server.address().port > 0);
+    } finally { await f.controller.dispose(); }
+    assert.equal(f.documents[0].value.providers.codex.baseURL, upstream);
+  }
+  const f = fixture({ io: { previousProxyURLs: [oldURL, otherURL, 'https://other.invalid/v1', 'http://127.0.0.1:99999/v1'] } });
+  f.documents[0].value.providers.codex.baseURL = oldURL;
+  f.documents[0].value.providers.second = profile(otherURL);
+  f.documents[0].value.providers.unrelated.baseURL = 'https://other.invalid/v1';
+  try {
+    await f.controller.setMode('headers');
+    assert.equal(f.documents[0].value.providers.codex.baseURL, upstream);
+    assert.equal(f.documents[0].value.providers.second.baseURL, upstream);
+    assert.equal(f.documents[0].value.providers.unrelated.baseURL, 'https://other.invalid/v1');
+  } finally { await f.controller.dispose(); }
 });
 
 test('real proxy listens before routing, stops, and rebinds after a round trip without inference', async () => {

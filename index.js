@@ -11,7 +11,7 @@ export const Config = Schema.object({
   state: Schema.any().default({}).volatile().description('插件报告的实际状态；请勿手工修改。'),
   upstreamBaseURL: Schema.string().default(defaults.upstreamBaseURL).description('上游 HTTPS API 基址；仅匹配这个完整基址。'),
   providerIds: Schema.array(Schema.string()).default([]).description('目标提供商 ID 白名单；留空则按上游基址匹配。'),
-  port: Schema.number().default(defaults.port).description('代理端口，只监听 127.0.0.1。'),
+  port: Schema.number().default(defaults.port).description('首选代理端口，只监听 127.0.0.1。0 为系统分配；端口占用或保留时自动申请空闲端口。'),
   credentialRef: Schema.string().default(defaults.credentialRef).role('credential-ref').description('旧版代理配置引用名；自动切换采用提供商 apiKeyEnv。'),
   originator: Schema.string().default(defaults.originator),
   windowId: Schema.string().default('').description('固定 UUID；留空则每次插件启动生成。'),
@@ -43,6 +43,8 @@ export async function apply(ctx, source) {
   lifetimes.set(namespace, lifetime);
   const controller = new ModeController(config, {
     waitForPrevious: previous?.done,
+    previousProxyURL: source.state.get()?.proxyBaseURL,
+    previousProxyURLs: source.state.get()?.proxyBaseURLs,
     readProviders: () => {
       const ids = new Set(editor.entries().filter(entry => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai').map(entry => entry.options.id));
       return settings.describe().filter(section => ids.has(section.ns));
@@ -86,7 +88,7 @@ export async function apply(ctx, source) {
   // edit inside the notification, which is dispatched while the profile write is locked.
   ctx.on('loader/volatile-update', paths => {
     if (live && paths.some(path => path[0] === 'mode' || path[0] === 'requestId')) {
-      void requestMode(source.mode.get()).catch(() => console.warn('[codex-compat] Mode switch interrupted'));
+      void requestMode(source.mode.get()).catch(error => console.warn('[codex-compat] Mode switch interrupted:', error.message));
     }
   });
   tools.register({
@@ -104,5 +106,5 @@ export async function apply(ctx, source) {
   });
   // Startup may precede this fiber becoming visible to settings.describe(). The
   // next event-loop turn reads the latest selection and joins the serialized queue.
-  setImmediate(() => { if (live && !requested) void requestMode(source.mode.get()).catch(() => console.warn('[codex-compat] Startup interrupted')); });
+  setImmediate(() => { if (live && !requested) void requestMode(source.mode.get()).catch(error => console.warn('[codex-compat] Startup interrupted:', error.message)); });
 }

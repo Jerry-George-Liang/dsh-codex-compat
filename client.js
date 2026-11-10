@@ -12,7 +12,7 @@ window.__ModuleLoader__.load({
         current: '实际生效：', switching: '正在切换…', starting: '正在读取状态…',
         failed: '切换未完成', retry: '重试所选方式', disable: '关闭兼容',
         unavailable: '配置暂不可用，请确认 Host 插件已启用。', refused: '未能保存，请刷新配置后重试。',
-        providers: '目标提供商：', empty: '暂无',
+        providers: '目标提供商：', empty: '暂无', proxyAddress: '代理地址：',
       },
       en: {
         title: 'Compatibility mode', headers: 'Direct headers', proxy: 'Local proxy', off: 'Off',
@@ -22,7 +22,7 @@ window.__ModuleLoader__.load({
         current: 'Active mode: ', switching: 'Switching…', starting: 'Reading status…',
         failed: 'Switch incomplete', retry: 'Retry selected mode', disable: 'Turn compatibility off',
         unavailable: 'Configuration is unavailable. Check that the Host plugin is enabled.', refused: 'Could not save. Refresh the configuration and retry.',
-        providers: 'Target providers: ', empty: 'None',
+        providers: 'Target providers: ', empty: 'None', proxyAddress: 'Proxy address: ',
       },
     };
     return {
@@ -71,6 +71,7 @@ window.__ModuleLoader__.load({
               !state?.phase || state.phase === 'starting' ? t('starting') :
                 state.phase === 'switching' ? t('switching') : t('current') + t(state.mode || 'off'),
               h('div', { style: { color: 'var(--dsw-alias-label-secondary)' } }, t('providers') + (state?.providers?.join(', ') || t('empty'))),
+              state?.mode === 'proxy' && state?.proxyBaseURL && h('div', { style: { color: 'var(--dsw-alias-label-secondary)', overflowWrap: 'anywhere' } }, t('proxyAddress') + state.proxyBaseURL),
               state?.message && h('div', { style: { color: state.phase === 'error' ? 'var(--dsw-alias-state-error-primary)' : 'var(--dsw-alias-label-secondary)' } }, state.message),
             ),
             failure && h('p', { role: 'alert', style: { margin: 0, color: 'var(--dsw-alias-state-error-primary)' } }, failure),

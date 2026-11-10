@@ -6,3 +6,4 @@ node_modules/
 # Superseded local Host bundles; the current release entry is tracked.
 /host-1.1.2.js
 /host-1.1.3.js
+/host-1.1.4.js

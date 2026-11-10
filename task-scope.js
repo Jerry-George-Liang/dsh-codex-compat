@@ -13,7 +13,8 @@ export function createTaskScope(webServer) {
     throw new Error('模式自动切换需要可通过本机回环地址访问的 Web 服务。');
   }
   const bearer = scopeNonce();
-  if (['localhost', '0.0.0.0'].includes(url.hostname)) url.hostname = '127.0.0.1';
+  // Preserve localhost so Node can try both IPv6 and IPv4 on Windows.
+  if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
   if (url.hostname === '[::]') url.hostname = '[::1]';
   url.pathname = `/_local-codex-compat-scope/${scopeNonce()}`;
   let scope;
@@ -38,22 +39,23 @@ export function createTaskScope(webServer) {
     } });
     const send = url.protocol === 'https:' ? scopeHttpsRequest : scopeHttpRequest;
     request = send(url, {
-      method: 'POST', agent: false, timeout: 10000,
+      method: 'POST', agent: false, timeout: 10000, autoSelectFamily: true,
       headers: { authorization: `Bearer ${bearer}` },
       // This fixed loopback handshake carries only an ephemeral nonce, and must
       // also work when the user's existing Web carrier has a self-signed cert.
       ...(url.protocol === 'https:' ? { rejectUnauthorized: false } : {}),
     }, res => {
       res.resume();
-      if (res.statusCode !== 204 && !settled) fail();
+      if (res.statusCode !== 204 && !settled) fail({ code: `HTTP_${res.statusCode}` });
     });
-    const fail = () => {
+    const fail = error => {
       if (settled) return;
       settled = true; remove();
-      reject(new Error('无法初始化插件切换任务；请检查当前 Web 服务是否可通过本机访问。'));
+      const code = /^[A-Z0-9_]+$/.test(error?.code ?? '') ? error.code : 'CONNECT_FAILED';
+      reject(new Error(`插件切换任务初始化失败（${code}）；请检查当前 Web 服务的本机连接。`));
     };
     request.once('error', fail);
-    request.once('timeout', () => { fail(); request.destroy(); });
+    request.once('timeout', () => { fail({ code: 'ETIMEDOUT' }); request.destroy(); });
     request.end();
   });
   // apply() must return without awaiting initialization inside the Loader lock.

@@ -34,7 +34,7 @@ export function prepareConfig(source = {}) {
   const config = { ...defaults, ...source };
   config.upstreamBaseURL = normalizeBaseURL(config.upstreamBaseURL);
   if (!['off', 'headers', 'proxy'].includes(config.mode)) throw new Error('Invalid compatibility mode');
-  if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new Error('port must be between 1 and 65535');
+  if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('port must be between 0 and 65535');
   if (!Number.isInteger(config.idleTimeoutMs) || config.idleTimeoutMs < 1 || config.idleTimeoutMs > 2147483647) throw new Error('Invalid idleTimeoutMs');
   if (!Array.isArray(config.providerIds) || config.providerIds.some(x => typeof x !== 'string' || !x.trim())) throw new Error('providerIds must contain provider IDs');
   if (typeof config.credentialRef !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.credentialRef)) throw new Error('credentialRef must name a credential reference');
@@ -185,10 +185,19 @@ const canonical = value => {
 // Routes are changed through the Host settings service, with revision fences.
 // Only baseURL is owned; keys, models, protocol, and concurrent edits are retained.
 export class ModeController {
-  constructor(config, { readProviders, mutate, resolveKey, publish = async () => {}, startProxy, waitForPrevious = Promise.resolve() }) {
+  constructor(config, { readProviders, mutate, resolveKey, publish = async () => {}, startProxy, previousProxyURL, previousProxyURLs = [], waitForPrevious = Promise.resolve() }) {
     this.config = config;
     this.io = { readProviders, mutate, resolveKey, publish, startProxy };
     this.localURL = `http://127.0.0.1:${config.port}/v1`;
+    this.localURLs = new Set([this.localURL]);
+    // Recover an OS-assigned port after a crash without claiming arbitrary local URLs.
+    for (const url of [...(Array.isArray(previousProxyURLs) ? previousProxyURLs : []), previousProxyURL]) {
+      const port = typeof url === 'string' && /^http:\/\/127\.0\.0\.1:([1-9]\d{0,4})\/v1$/.exec(url)?.[1];
+      if (port && Number(port) <= 65535) {
+        this.localURL = url;
+        this.localURLs.add(url);
+      }
+    }
     this.mode = 'off';
     this.server = undefined;
     this.tail = Promise.resolve(waitForPrevious);
@@ -200,7 +209,7 @@ export class ModeController {
     return this.io.readProviders().flatMap(section => Object.entries(section.value.providers ?? {}).flatMap(([id, profile]) => {
       if (this.config.providerIds.length && !this.config.providerIds.includes(id)) return [];
       const url = canonical(profile.baseURL);
-      if (url !== this.config.upstreamBaseURL && url !== this.localURL) return [];
+      if (url !== this.config.upstreamBaseURL && !this.localURLs.has(url)) return [];
       return [{ ns: section.ns, id, profile, revision: section.revision }];
     }));
   }
@@ -213,7 +222,7 @@ export class ModeController {
   }
 
   async report(phase, message = '') {
-    this.state = { mode: this.mode, phase, message, providers: this.targets().map(row => row.id) };
+    this.state = { mode: this.mode, phase, message, providers: this.targets().map(row => row.id), proxyBaseURL: this.localURL, proxyBaseURLs: [...this.localURLs] };
     await this.io.publish(this.state);
     return this.state;
   }
@@ -278,13 +287,25 @@ export class ModeController {
     if (this.closed) throw new Error('插件已停用。');
     const config = { ...this.config, credentialRef: ref };
     if (this.io.startProxy) return this.io.startProxy(config);
-    const server = createCompatibilityServer(config, { resolveKey: () => this.io.resolveKey(this.proxyRef()) });
-    await new Promise((resolve, reject) => {
-      const fail = () => { server.stop(); reject(new Error('本地代理端口被占用或无法监听，原模式保留。')); };
-      server.once('error', fail);
-      server.listen(config.port, '127.0.0.1', () => { server.off('error', fail); resolve(); });
-    });
-    return server;
+    for (const port of config.port === 0 ? [0] : [config.port, 0]) {
+      const server = createCompatibilityServer(config, { resolveKey: () => this.io.resolveKey(this.proxyRef()) });
+      try {
+        await new Promise((resolve, reject) => {
+          const ready = () => { server.off('error', fail); resolve(); };
+          const fail = error => { server.off('listening', ready); reject(error); };
+          server.once('error', fail);
+          server.once('listening', ready);
+          server.listen(port, '127.0.0.1');
+        });
+        return server;
+      } catch (error) {
+        await server.stop();
+        // Windows can reserve ports for Hyper-V/WSL; let the OS choose a port.
+        if (port !== 0 && ['EADDRINUSE', 'EACCES'].includes(error.code)) continue;
+        const code = /^[A-Z0-9_]+$/.test(error.code ?? '') ? error.code : 'LISTEN_FAILED';
+        throw new Error(`本地代理监听失败（${code}，127.0.0.1:${port}），原模式保留。请检查端口限制或防火墙设置。`);
+      }
+    }
   }
 
   async transition(mode) {
@@ -301,6 +322,13 @@ export class ModeController {
         this.proxyRef(targets);
         candidate = this.server ?? await this.openProxy(targets);
         if (this.closed) throw new Error('插件已停用。');
+        const address = candidate.address?.();
+        if (address && typeof address === 'object') {
+          this.localURL = `http://127.0.0.1:${address.port}/v1`;
+          this.localURLs.add(this.localURL);
+        }
+        // Persist the actual port before redirecting any caller to it.
+        await this.report('switching');
         const current = this.targets();
         if (!current.length) throw new Error('目标提供商配置在切换期间已修改，请重新选择方式。');
         this.proxyRef(current);
@@ -336,17 +364,17 @@ export class ModeController {
     // Disposal must not roll an already restored namespace back to a dead proxy.
     // Re-read each namespace after a conflict, preserving every concurrent edit.
     for (let attempt = 0; attempt < 3; attempt++) {
-      const namespaces = new Set(this.targets().filter(row => canonical(row.profile.baseURL) === this.localURL).map(row => row.ns));
+      const namespaces = new Set(this.targets().filter(row => this.localURLs.has(canonical(row.profile.baseURL))).map(row => row.ns));
       if (!namespaces.size) return;
       for (const ns of namespaces) {
-        const rows = this.targets().filter(row => row.ns === ns && canonical(row.profile.baseURL) === this.localURL);
+        const rows = this.targets().filter(row => row.ns === ns && this.localURLs.has(canonical(row.profile.baseURL)));
         if (!rows.length) continue;
         try {
           await this.io.mutate(ns, rows.map(row => ({ op: 'set', path: ['providers', row.id, 'baseURL'], value: this.config.upstreamBaseURL })), rows[0].revision);
         } catch { /* Retry from fresh values; a manual URL edit is never overwritten. */ }
       }
     }
-    if (this.targets().some(row => canonical(row.profile.baseURL) === this.localURL)) {
+    if (this.targets().some(row => this.localURLs.has(canonical(row.profile.baseURL)))) {
       throw new Error('无法恢复本地代理地址，请在模型设置中恢复上游地址。');
     }
   }
@@ -375,7 +403,8 @@ export function createTaskScope(webServer) {
     throw new Error('模式自动切换需要可通过本机回环地址访问的 Web 服务。');
   }
   const bearer = scopeNonce();
-  if (['localhost', '0.0.0.0'].includes(url.hostname)) url.hostname = '127.0.0.1';
+  // Preserve localhost so Node can try both IPv6 and IPv4 on Windows.
+  if (url.hostname === '0.0.0.0') url.hostname = '127.0.0.1';
   if (url.hostname === '[::]') url.hostname = '[::1]';
   url.pathname = `/_local-codex-compat-scope/${scopeNonce()}`;
   let scope;
@@ -400,22 +429,23 @@ export function createTaskScope(webServer) {
     } });
     const send = url.protocol === 'https:' ? scopeHttpsRequest : scopeHttpRequest;
     request = send(url, {
-      method: 'POST', agent: false, timeout: 10000,
+      method: 'POST', agent: false, timeout: 10000, autoSelectFamily: true,
       headers: { authorization: `Bearer ${bearer}` },
       // This fixed loopback handshake carries only an ephemeral nonce, and must
       // also work when the user's existing Web carrier has a self-signed cert.
       ...(url.protocol === 'https:' ? { rejectUnauthorized: false } : {}),
     }, res => {
       res.resume();
-      if (res.statusCode !== 204 && !settled) fail();
+      if (res.statusCode !== 204 && !settled) fail({ code: `HTTP_${res.statusCode}` });
     });
-    const fail = () => {
+    const fail = error => {
       if (settled) return;
       settled = true; remove();
-      reject(new Error('无法初始化插件切换任务；请检查当前 Web 服务是否可通过本机访问。'));
+      const code = /^[A-Z0-9_]+$/.test(error?.code ?? '') ? error.code : 'CONNECT_FAILED';
+      reject(new Error(`插件切换任务初始化失败（${code}）；请检查当前 Web 服务的本机连接。`));
     };
     request.once('error', fail);
-    request.once('timeout', () => { fail(); request.destroy(); });
+    request.once('timeout', () => { fail({ code: 'ETIMEDOUT' }); request.destroy(); });
     request.end();
   });
   // apply() must return without awaiting initialization inside the Loader lock.
@@ -443,7 +473,7 @@ export const Config = Schema.object({
   state: Schema.any().default({}).volatile().description('插件报告的实际状态；请勿手工修改。'),
   upstreamBaseURL: Schema.string().default(defaults.upstreamBaseURL).description('上游 HTTPS API 基址；仅匹配这个完整基址。'),
   providerIds: Schema.array(Schema.string()).default([]).description('目标提供商 ID 白名单；留空则按上游基址匹配。'),
-  port: Schema.number().default(defaults.port).description('代理端口，只监听 127.0.0.1。'),
+  port: Schema.number().default(defaults.port).description('首选代理端口，只监听 127.0.0.1。0 为系统分配；端口占用或保留时自动申请空闲端口。'),
   credentialRef: Schema.string().default(defaults.credentialRef).role('credential-ref').description('旧版代理配置引用名；自动切换采用提供商 apiKeyEnv。'),
   originator: Schema.string().default(defaults.originator),
   windowId: Schema.string().default('').description('固定 UUID；留空则每次插件启动生成。'),
@@ -475,6 +505,8 @@ export async function apply(ctx, source) {
   lifetimes.set(namespace, lifetime);
   const controller = new ModeController(config, {
     waitForPrevious: previous?.done,
+    previousProxyURL: source.state.get()?.proxyBaseURL,
+    previousProxyURLs: source.state.get()?.proxyBaseURLs,
     readProviders: () => {
       const ids = new Set(editor.entries().filter(entry => entry.options.name === '@deepseek-ai/dsh-llm-pi-ai').map(entry => entry.options.id));
       return settings.describe().filter(section => ids.has(section.ns));
@@ -518,7 +550,7 @@ export async function apply(ctx, source) {
   // edit inside the notification, which is dispatched while the profile write is locked.
   ctx.on('loader/volatile-update', paths => {
     if (live && paths.some(path => path[0] === 'mode' || path[0] === 'requestId')) {
-      void requestMode(source.mode.get()).catch(() => console.warn('[codex-compat] Mode switch interrupted'));
+      void requestMode(source.mode.get()).catch(error => console.warn('[codex-compat] Mode switch interrupted:', error.message));
     }
   });
   tools.register({
@@ -536,5 +568,5 @@ export async function apply(ctx, source) {
   });
   // Startup may precede this fiber becoming visible to settings.describe(). The
   // next event-loop turn reads the latest selection and joins the serialized queue.
-  setImmediate(() => { if (live && !requested) void requestMode(source.mode.get()).catch(() => console.warn('[codex-compat] Startup interrupted')); });
+  setImmediate(() => { if (live && !requested) void requestMode(source.mode.get()).catch(error => console.warn('[codex-compat] Startup interrupted:', error.message)); });
 }

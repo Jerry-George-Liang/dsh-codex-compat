@@ -32,7 +32,7 @@ export function prepareConfig(source = {}) {
   const config = { ...defaults, ...source };
   config.upstreamBaseURL = normalizeBaseURL(config.upstreamBaseURL);
   if (!['off', 'headers', 'proxy'].includes(config.mode)) throw new Error('Invalid compatibility mode');
-  if (!Number.isInteger(config.port) || config.port < 1 || config.port > 65535) throw new Error('port must be between 1 and 65535');
+  if (!Number.isInteger(config.port) || config.port < 0 || config.port > 65535) throw new Error('port must be between 0 and 65535');
   if (!Number.isInteger(config.idleTimeoutMs) || config.idleTimeoutMs < 1 || config.idleTimeoutMs > 2147483647) throw new Error('Invalid idleTimeoutMs');
   if (!Array.isArray(config.providerIds) || config.providerIds.some(x => typeof x !== 'string' || !x.trim())) throw new Error('providerIds must contain provider IDs');
   if (typeof config.credentialRef !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(config.credentialRef)) throw new Error('credentialRef must name a credential reference');

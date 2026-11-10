@@ -18,7 +18,8 @@ const inputs = [
 ];
 const sections = [];
 for (const [file, imports] of inputs) {
-  let text = await readFile(new URL(file, root), 'utf8');
+  // Git's core.autocrlf can produce CRLF checkouts on Windows.
+  let text = (await readFile(new URL(file, root), 'utf8')).replace(/\r\n/g, '\n');
   for (const line of imports) {
     assert.equal(text.split(line).length, 2, `Expected exactly one local import in ${file}`);
     text = text.replace(line, '');
